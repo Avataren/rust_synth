@@ -3,8 +3,13 @@ name = "cpal-synth"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["cpal-output"]
+cpal-output = ["cpal"]
+web-output = []
+
 [dependencies]
 anyhow = "1.0.93"
-cpal = "0.15.3"
+cpal = { version = "0.15.3", optional = true }
 rustfft = "6.2.0"
 lazy_static = "1.5.0"

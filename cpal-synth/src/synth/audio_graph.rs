@@ -1,27 +1,31 @@
 use super::audio_node::AudioNode;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{FromSample, Sample};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+#[cfg(feature = "cpal-output")]
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(feature = "cpal-output")]
+use cpal::{FromSample, Sample};
 
 pub struct AudioGraph {
     nodes: HashMap<String, Arc<Mutex<dyn AudioNode>>>,
     output_node: Arc<Mutex<dyn AudioNode>>,
     playing: Arc<AtomicBool>,
+    #[cfg(feature = "cpal-output")]
     stream: Option<cpal::Stream>,
 }
 
 impl AudioGraph {
     pub fn new() -> anyhow::Result<Self> {
         use super::processor::AudioProcessor;
-        // Create a default gain node as the output
         let output_node = Arc::new(Mutex::new(AudioProcessor::new("gain")));
 
         Ok(Self {
             nodes: HashMap::new(),
             output_node,
             playing: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "cpal-output")]
             stream: None,
         })
     }
@@ -55,41 +59,49 @@ impl AudioGraph {
     }
 
     pub fn start(&mut self) -> anyhow::Result<()> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| anyhow::anyhow!("No output device available"))?;
+        #[cfg(feature = "cpal-output")]
+        {
+            let host = cpal::default_host();
+            let device = host
+                .default_output_device()
+                .ok_or_else(|| anyhow::anyhow!("No output device available"))?;
 
-        let config = device.default_output_config()?;
+            let config = device.default_output_config()?;
+            let playing = self.playing.clone();
+            let output_node = self.output_node.clone();
 
-        let playing = self.playing.clone();
-        let output_node = self.output_node.clone();
+            let stream = match config.sample_format() {
+                cpal::SampleFormat::F32 => {
+                    self.build_stream::<f32>(&device, &config.into(), playing, output_node)?
+                }
+                cpal::SampleFormat::I16 => {
+                    self.build_stream::<i16>(&device, &config.into(), playing, output_node)?
+                }
+                cpal::SampleFormat::U16 => {
+                    self.build_stream::<u16>(&device, &config.into(), playing, output_node)?
+                }
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "Unsupported sample format: {:?}",
+                        config.sample_format()
+                    ));
+                }
+            };
 
-        let stream = match config.sample_format() {
-            cpal::SampleFormat::F32 => {
-                self.build_stream::<f32>(&device, &config.into(), playing, output_node)?
-            }
-            cpal::SampleFormat::I16 => {
-                self.build_stream::<i16>(&device, &config.into(), playing, output_node)?
-            }
-            cpal::SampleFormat::U16 => {
-                self.build_stream::<u16>(&device, &config.into(), playing, output_node)?
-            }
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "Unsupported sample format: {:?}",
-                    config.sample_format()
-                ));
-            }
-        };
+            stream.play()?;
+            self.stream = Some(stream);
+        }
 
-        stream.play()?;
-        self.stream = Some(stream);
+        #[cfg(feature = "web-output")]
+        {
+            // Web audio implementation will go here
+        }
+
         self.playing.store(true, Ordering::SeqCst);
-
         Ok(())
     }
 
+    #[cfg(feature = "cpal-output")]
     fn build_stream<T>(
         &self,
         device: &cpal::Device,
@@ -117,6 +129,7 @@ impl AudioGraph {
         Ok(stream)
     }
 
+    #[cfg(feature = "cpal-output")]
     fn write_data<T>(
         output: &mut [T],
         channels: usize,
@@ -148,6 +161,9 @@ impl AudioGraph {
 
     pub fn stop(&mut self) {
         self.playing.store(false, Ordering::SeqCst);
-        self.stream = None;
+        #[cfg(feature = "cpal-output")]
+        {
+            self.stream = None;
+        }
     }
 }

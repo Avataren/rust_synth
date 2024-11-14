@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "cpal-synth",
-    "native"
+    "native",
+    "web"
 ]
 resolver = "2"
