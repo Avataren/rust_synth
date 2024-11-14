@@ -1,0 +1,8 @@
+[package]
+name = "native-example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cpal-synth = { path = "../cpal-synth" }
+anyhow = "1.0.93"

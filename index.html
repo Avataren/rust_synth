@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WASM Synth Test</title>
+</head>
+<body>
+    <button id="startBtn">Start</button>
+    <button id="stopBtn">Stop</button>
+    <input type="range" id="freqSlider" min="20" max="2000" value="440">
+    <span id="freqValue">440 Hz</span>
+
+    <script type="module">
+        import init, { WASMSynth } from './pkg/cpal_synth.js';
+
+        async function main() {
+            await init();
+            
+            const synth = new WASMSynth();
+            const startBtn = document.getElementById('startBtn');
+            const stopBtn = document.getElementById('stopBtn');
+            const freqSlider = document.getElementById('freqSlider');
+            const freqValue = document.getElementById('freqValue');
+
+            startBtn.onclick = () => {
+                synth.start();
+            };
+
+            stopBtn.onclick = () => {
+                synth.stop();
+            };
+
+            freqSlider.oninput = () => {
+                const freq = parseFloat(freqSlider.value);
+                synth.set_frequency(freq);
+                freqValue.textContent = `${freq} Hz`;
+            };
+        }
+
+        main();
+    </script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "cpal-synth",
+    "native"
+]
+resolver = "2"
