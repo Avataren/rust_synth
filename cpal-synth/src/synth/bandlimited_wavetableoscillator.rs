@@ -1,3 +1,4 @@
+use super::audio_context::AUDIO_CONTEXT;
 use super::audio_node::AudioNode;
 use super::audio_param::AudioParam;
 use super::oscillator::OscillatorType;
@@ -8,13 +9,20 @@ use std::sync::{Arc, Mutex};
 
 // Move the lazy_static definition outside any struct/impl blocks
 lazy_static! {
-    static ref WAVETABLE_BANKS: Mutex<HashMap<OscillatorType, Arc<WaveTableBank>>> = {
+    static ref WAVETABLE_BANKS: Mutex<HashMap<(OscillatorType, u32), Arc<WaveTableBank>>> = {
         let m = HashMap::new();
         Mutex::new(m)
     };
 }
 
-pub fn initialize_wave_banks() {
+pub fn initialize_wave_banks() -> anyhow::Result<()> {
+    let sample_rate = AUDIO_CONTEXT
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Failed to acquire audio context lock"))?
+        .sample_rate();
+
+    let sample_rate_key = sample_rate as u32;
+
     let oscillator_types = [
         OscillatorType::Sine,
         OscillatorType::Square,
@@ -22,16 +30,28 @@ pub fn initialize_wave_banks() {
         OscillatorType::Triangle,
     ];
 
-    let mut banks = WAVETABLE_BANKS.lock().unwrap();
+    let mut banks = WAVETABLE_BANKS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Failed to acquire wavetable banks lock"))?;
+
     for &osc_type in &oscillator_types {
-        if !banks.contains_key(&osc_type) {
-            println!("Initializing wave bank for {:?}", osc_type);
-            let bank = Arc::new(WaveTableBank::new(osc_type));
-            banks.insert(osc_type, bank);
+        let key = (osc_type, sample_rate_key);
+        if !banks.contains_key(&key) {
+            println!(
+                "Initializing wave bank for {:?} at {}Hz",
+                osc_type, sample_rate_key
+            );
+            let bank = Arc::new(WaveTableBank::new(osc_type, sample_rate));
+            banks.insert(key, bank);
         } else {
-            println!("Wave bank for {:?} already initialized", osc_type);
+            println!(
+                "Wave bank for {:?} at {}Hz already initialized",
+                osc_type, sample_rate_key
+            );
         }
     }
+
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -43,15 +63,15 @@ struct WaveTable {
 #[derive(Debug)]
 struct WaveTableBank {
     tables: Vec<WaveTable>,
+    sample_rate: f32,
 }
 
 impl WaveTableBank {
-    fn new(waveform: OscillatorType) -> Self {
-        const SAMPLE_RATE: f32 = 44100.0;
+    fn new(waveform: OscillatorType, sample_rate: f32) -> Self {
         const BASE_FREQ: f32 = 20.0;
         const OVERSAMP: usize = 2;
 
-        let max_harmonics = (SAMPLE_RATE / (3.0 * BASE_FREQ)) as usize;
+        let max_harmonics = (sample_rate / (3.0 * BASE_FREQ)) as usize;
 
         let mut v = max_harmonics;
         v = v.saturating_sub(1);
@@ -66,12 +86,9 @@ impl WaveTableBank {
         let mut planner = FftPlanner::new();
         let fft = planner.plan_fft_forward(table_len);
 
-        // Create all tables without normalization
         let mut tables = Vec::new();
         let mut harmonics = max_harmonics;
-        let mut top_freq = BASE_FREQ * 2.0 / SAMPLE_RATE;
-
-        println!("Generating wavetables for {:?}...", waveform);
+        let mut top_freq = BASE_FREQ * 2.0 / sample_rate;
 
         while harmonics >= 1 {
             let table = Self::create_wavetable(table_len, harmonics, waveform, top_freq, &fft);
@@ -80,13 +97,12 @@ impl WaveTableBank {
             top_freq *= 2.0;
         }
 
-        // Find global maximum across all tables
+        // Normalize all tables...
         let global_max = tables
             .iter()
             .flat_map(|table| table.wave_table.iter())
             .fold(0.0f32, |max, &x| max.max(x.abs()));
 
-        // Normalize all tables by the global maximum
         if global_max > 0.0 {
             for table in &mut tables {
                 let mut normalized = Vec::with_capacity(table.wave_table.len());
@@ -97,8 +113,10 @@ impl WaveTableBank {
             }
         }
 
-        println!("Generated {} tables for {:?}", tables.len(), waveform);
-        Self { tables }
+        Self {
+            tables,
+            sample_rate,
+        }
     }
 
     fn create_wavetable(
@@ -159,31 +177,46 @@ pub struct BandlimitedWavetableOscillator {
 }
 
 impl BandlimitedWavetableOscillator {
-    pub fn new(waveform: OscillatorType) -> Self {
-        // Get or create wavetable bank
+    pub fn new(waveform: OscillatorType) -> anyhow::Result<Self> {
+        let sample_rate = AUDIO_CONTEXT
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to acquire audio context lock"))?
+            .sample_rate();
+
+        let sample_rate_key = sample_rate as u32;
+
         let bank = {
-            let mut banks = WAVETABLE_BANKS.lock().unwrap();
-            if let Some(bank) = banks.get(&waveform) {
-                println!("Reusing existing wavetables for {:?}", waveform);
+            let mut banks = WAVETABLE_BANKS
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Failed to acquire wavetable banks lock"))?;
+
+            let key = (waveform, sample_rate_key);
+            if let Some(bank) = banks.get(&key) {
+                println!(
+                    "Reusing existing wavetables for {:?} at {}Hz",
+                    waveform, sample_rate_key
+                );
                 bank.clone()
             } else {
-                println!("Creating new wavetables for {:?}", waveform);
-                let bank = Arc::new(WaveTableBank::new(waveform));
-                banks.insert(waveform, bank.clone());
+                println!(
+                    "Creating new wavetables for {:?} at {}Hz",
+                    waveform, sample_rate_key
+                );
+                let bank = Arc::new(WaveTableBank::new(waveform, sample_rate));
+                banks.insert(key, bank.clone());
                 bank
             }
         };
 
-        Self {
+        Ok(Self {
             bank,
             frequency: AudioParam::new(440.0, 0.01, 22050.0),
             gain: AudioParam::new(1.0, 0.0, 1.0),
             phase: 0.0,
             phase_increment: 0.0,
             current_table: 0,
-        }
+        })
     }
-
     pub fn frequency(&mut self) -> &mut AudioParam {
         &mut self.frequency
     }

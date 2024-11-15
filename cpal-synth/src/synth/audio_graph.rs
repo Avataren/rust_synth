@@ -1,4 +1,6 @@
+use super::audio_context::{initialize_audio_context, AUDIO_CONTEXT};
 use super::audio_node::AudioNode;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,6 +20,18 @@ pub struct AudioGraph {
 
 impl AudioGraph {
     pub fn new() -> anyhow::Result<Self> {
+        #[cfg(feature = "cpal-output")]
+        {
+            let host = cpal::default_host();
+            let device = host
+                .default_output_device()
+                .ok_or_else(|| anyhow::anyhow!("No output device available"))?;
+            let config = device.default_output_config()?;
+
+            // Initialize the audio context with the actual sample rate
+            initialize_audio_context(config.sample_rate().0 as f32);
+        }
+
         use super::processor::AudioProcessor;
         let output_node = Arc::new(Mutex::new(AudioProcessor::new("gain")));
 
@@ -147,6 +161,10 @@ impl AudioGraph {
         }
 
         for frame in output.chunks_mut(channels) {
+            if let Ok(mut context) = AUDIO_CONTEXT.lock() {
+                context.increment_sample();
+            }
+
             let value = output_node
                 .lock()
                 .map(|mut node| node.process(sample_rate))

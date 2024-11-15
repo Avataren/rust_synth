@@ -1,4 +1,4 @@
-use std::time::Instant;
+use super::audio_context::AUDIO_CONTEXT;
 
 #[derive(Debug, Clone, Copy)]
 pub enum RampType {
@@ -7,11 +7,11 @@ pub enum RampType {
 }
 
 #[derive(Debug, Clone)]
-pub struct RampEvent {
+struct RampEvent {
     start_value: f32,
     end_value: f32,
-    start_time: Instant,
-    duration: f32,
+    start_sample: u64,
+    duration_samples: u64,
     ramp_type: RampType,
 }
 
@@ -36,66 +36,71 @@ impl AudioParam {
 
     pub fn set_value(&mut self, value: f32) {
         self.current_value = self.clamp_value(value);
-        self.events.clear(); // Cancel any scheduled ramps
-    }
-
-    pub fn set_value_at_time(&mut self, value: f32, time: Instant) {
-        let value = self.clamp_value(value);
-        self.events.push(RampEvent {
-            start_value: self.current_value,
-            end_value: value,
-            start_time: time,
-            duration: 0.0,
-            ramp_type: RampType::Linear,
-        });
-    }
-
-    pub fn reset(&mut self) {
-        self.current_value = self.default_value;
         self.events.clear();
     }
 
-    pub fn default_value(&self) -> f32 {
-        self.default_value
-    }
-
-    pub fn linear_ramp_to_value_at_time(&mut self, value: f32, duration: f32) {
+    pub fn set_value_at_time(&mut self, value: f32, time: f64) {
         let value = self.clamp_value(value);
-        self.events.push(RampEvent {
-            start_value: self.current_value,
-            end_value: value,
-            start_time: Instant::now(),
-            duration,
-            ramp_type: RampType::Linear,
-        });
+        if let Ok(context) = AUDIO_CONTEXT.lock() {
+            let sample_offset = (time * context.sample_rate() as f64) as u64;
+            let current_sample = context.current_sample();
+            self.events.push(RampEvent {
+                start_value: self.current_value,
+                end_value: value,
+                start_sample: current_sample + sample_offset,
+                duration_samples: 0,
+                ramp_type: RampType::Linear,
+            });
+        }
     }
 
-    pub fn exponential_ramp_to_value_at_time(&mut self, value: f32, duration: f32) {
-        let value = self.clamp_value(value.max(0.00001)); // Prevent zero for exp ramp
-        self.events.push(RampEvent {
-            start_value: self.current_value.max(0.00001),
-            end_value: value,
-            start_time: Instant::now(),
-            duration,
-            ramp_type: RampType::Exponential,
-        });
+    pub fn linear_ramp_to_value_at_time(&mut self, value: f32, duration_seconds: f32) {
+        let value = self.clamp_value(value);
+        if let Ok(context) = AUDIO_CONTEXT.lock() {
+            let duration_samples = (duration_seconds * context.sample_rate()) as u64;
+            let current_sample = context.current_sample();
+            self.events.push(RampEvent {
+                start_value: self.current_value,
+                end_value: value,
+                start_sample: current_sample,
+                duration_samples,
+                ramp_type: RampType::Linear,
+            });
+        }
     }
 
-    pub fn cancel_scheduled_values(&mut self) {
-        self.events.clear();
+    pub fn exponential_ramp_to_value_at_time(&mut self, value: f32, duration_seconds: f32) {
+        let value = self.clamp_value(value.max(0.00001));
+        if let Ok(context) = AUDIO_CONTEXT.lock() {
+            let duration_samples = (duration_seconds * context.sample_rate()) as u64;
+            let current_sample = context.current_sample();
+            self.events.push(RampEvent {
+                start_value: self.current_value.max(0.00001),
+                end_value: value,
+                start_sample: current_sample,
+                duration_samples,
+                ramp_type: RampType::Exponential,
+            });
+        }
     }
 
     pub fn get_value(&mut self) -> f32 {
-        if let Some(event) = self.events.first() {
-            let elapsed = event.start_time.elapsed().as_secs_f32();
+        let current_sample = if let Ok(context) = AUDIO_CONTEXT.lock() {
+            context.current_sample()
+        } else {
+            return self.current_value;
+        };
 
-            if elapsed >= event.duration {
+        if let Some(event) = self.events.first() {
+            let samples_elapsed = current_sample.saturating_sub(event.start_sample);
+
+            if samples_elapsed >= event.duration_samples {
                 // Event is complete
                 self.current_value = event.end_value;
                 self.events.remove(0);
-            } else if event.duration > 0.0 {
+            } else if event.duration_samples > 0 {
                 // Event is in progress
-                let t = elapsed / event.duration;
+                let t = samples_elapsed as f32 / event.duration_samples as f32;
                 self.current_value = match event.ramp_type {
                     RampType::Linear => {
                         event.start_value + (event.end_value - event.start_value) * t
@@ -112,6 +117,19 @@ impl AudioParam {
         }
 
         self.current_value
+    }
+
+    pub fn reset(&mut self) {
+        self.current_value = self.default_value;
+        self.events.clear();
+    }
+
+    pub fn default_value(&self) -> f32 {
+        self.default_value
+    }
+
+    pub fn cancel_scheduled_values(&mut self) {
+        self.events.clear();
     }
 
     fn clamp_value(&self, value: f32) -> f32 {

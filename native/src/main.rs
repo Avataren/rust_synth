@@ -8,12 +8,14 @@ use std::time::Duration;
 
 fn main() -> anyhow::Result<()> {
     let mut graph = AudioGraph::new()?;
-    initialize_wave_banks();
+    initialize_wave_banks()?;
+
     // Create master gain node and set it as the output
     let master_gain = Arc::new(Mutex::new(AudioProcessor::new("gain")));
     graph.add_node("master_gain", master_gain.clone());
     graph.set_output("master_gain");
     graph.start()?;
+
     // Set master gain to maximum
     {
         let mut master = master_gain.lock().unwrap();
@@ -37,7 +39,9 @@ fn main() -> anyhow::Result<()> {
 
         // Bandlimited Wavetable Oscillator
         {
-            let wavetable_osc = Arc::new(Mutex::new(BandlimitedWavetableOscillator::new(osc_type)));
+            // Create and unwrap the wavetable oscillator
+            let wavetable_osc =
+                Arc::new(Mutex::new(BandlimitedWavetableOscillator::new(osc_type)?));
             let wavetable_gain = Arc::new(Mutex::new(AudioProcessor::new("gain")));
 
             graph.add_node("wavetable_osc", wavetable_osc.clone());

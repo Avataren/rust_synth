@@ -7,32 +7,22 @@ const init = import('./pkg').then((module) => {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  async function performFrequencySweep(setFrequency, duration = 5000) {
-    const startFreq = 20;
-    const endFreq = 10000;
-    const startTime = Date.now();
-
-    while (Date.now() - startTime < duration) {
-      const progress = (Date.now() - startTime) / duration;
-      const currentFreq = startFreq * Math.pow(endFreq / startFreq, progress);
-      setFrequency(currentFreq);
-      await new Promise((r) => requestAnimationFrame(r));
-    }
-  }
-
   async function performSweep() {
     const types = ['sine', 'square', 'sawtooth', 'triangle'];
+    const duration = 5.0; // Duration in seconds
 
     for (const type of types) {
       statusEl.textContent = `Sweeping BandlimitedWavetableOscillator with ${type}...`;
-      await handle.sweep_wavetable(type);
-      await performFrequencySweep((f) => handle.set_wavetable_frequency(f));
+      await handle.sweep_wavetable(type, 20.0, 10000.0, duration);
+      // Wait for the sweep to complete
+      await sleep(duration * 1000);
       handle.silence_wavetable();
       await sleep(500);
 
       statusEl.textContent = `Sweeping Oscillator with ${type}...`;
-      await handle.sweep_regular(type);
-      await performFrequencySweep((f) => handle.set_regular_frequency(f));
+      await handle.sweep_regular(type, 20.0, 10000.0, duration);
+      // Wait for the sweep to complete
+      await sleep(duration * 1000);
       handle.silence_regular();
       await sleep(500);
 

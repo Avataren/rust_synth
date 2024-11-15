@@ -21,6 +21,9 @@ module.exports = {
   experiments: {
     asyncWebAssembly: true,
   },
+  performance: {
+    hints: false
+  },  
   plugins: [
     new HtmlWebpackPlugin({
       template: 'index.html',

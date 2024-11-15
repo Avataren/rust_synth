@@ -2,8 +2,12 @@
   "name": "rust-synth-web",
   "version": "0.1.0",
   "scripts": {
+    "clean": "rimraf dist pkg",
     "build": "rimraf dist pkg && webpack",
-    "start": "rimraf dist pkg && webpack-dev-server --open",
+    "build:debug": "wasm-pack build --target web --dev",
+    "build:release": "wasm-pack build --target web --release",
+    "start": "npm run clean && npm run build:debug && webpack-dev-server --open --mode development",
+    "start:release": "npm run clean && npm run build:release && webpack-dev-server --open --mode production",
     "test": "cargo test && wasm-pack test --headless"
   },
   "devDependencies": {
