@@ -17,7 +17,6 @@ pub struct Oscillator {
     gain: AudioParam,
     phase: f32,
     triangle_state: f32,
-    last_square: f32, // track previous square value
 }
 
 impl Oscillator {
@@ -28,7 +27,6 @@ impl Oscillator {
             gain: AudioParam::new(1.0, 0.0, 1.0),
             phase: 0.0,
             triangle_state: 0.0,
-            last_square: 0.0,
         }
     }
 
