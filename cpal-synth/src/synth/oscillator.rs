@@ -17,6 +17,7 @@ pub struct Oscillator {
     gain: AudioParam,
     phase: f32,
     triangle_state: f32,
+    last_square: f32, // track previous square value
 }
 
 impl Oscillator {
@@ -27,6 +28,7 @@ impl Oscillator {
             gain: AudioParam::new(1.0, 0.0, 1.0),
             phase: 0.0,
             triangle_state: 0.0,
+            last_square: 0.0,
         }
     }
 
@@ -68,21 +70,17 @@ impl Oscillator {
                 out
             }
             OscillatorType::Triangle => {
-                // Generate triangle by integrating band-limited square wave
-                let square = if self.phase < 0.5 { 1.0 } else { -1.0 };
-                let mut square_bl = square;
-
-                // Add polyBLEP to square wave
+                // Generate band-limited square wave
+                let mut square_bl = if self.phase < 0.5 { 1.0 } else { -1.0 };
                 square_bl += self.poly_blep(self.phase, dt);
                 square_bl -= self.poly_blep(fmod(self.phase + 0.5, 1.0), dt);
 
-                // Leaky integrator to prevent DC offset accumulation
-                let leak = 0.995;
-                self.triangle_state =
-                    leak * self.triangle_state + (square_bl * 8.0 * freq / sample_rate);
+                // Simple integration with fixed coefficient
+                let integration_scale = 2.0 * freq / sample_rate;
+                self.triangle_state = 0.999 * self.triangle_state + square_bl * integration_scale;
 
                 // Scale the output
-                4.0 * self.triangle_state
+                self.triangle_state
             }
         };
 
