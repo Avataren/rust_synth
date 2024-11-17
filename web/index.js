@@ -16,25 +16,49 @@ async function loadWasmModule() {
 }
 
 async function performSweep() {
-  const types = ['sine', 'square', 'sawtooth', 'triangle'];
+  const oscillatorTypes = ['sine', 'square', 'sawtooth', 'triangle'];
   const duration = 5.0; // Duration in seconds
 
-  for (const type of types) {
+  statusEl.textContent = 'Initializing audio system...';
+
+  for (const type of oscillatorTypes) {
+    console.log(
+      `\nSweeping BandlimitedWavetableOscillator with ${type} waveform...`
+    );
     statusEl.textContent = `Sweeping BandlimitedWavetableOscillator with ${type}...`;
-    await handle.sweep_wavetable(type, 20.0, 20000.0, duration);
-    await sleep(duration * 1000);
+
+    // Wavetable oscillator sweep
+    await handle.sweep_wavetable(type, 20.0, 10000.0, duration);
+    console.log(`Started wavetable ${type} sweep`);
+
+    // Wait slightly less than the full duration to account for fade out
+    await sleep((duration - 0.01) * 1000);
+    console.log('Finishing wavetable sweep');
+
+    // Start fade out slightly before the end
     handle.silence_wavetable();
-    await sleep(500);
+    await sleep(20); // Wait for fade out
 
+    console.log(`\nSweeping Oscillator with ${type} waveform...`);
     statusEl.textContent = `Sweeping Oscillator with ${type}...`;
-    await handle.sweep_regular(type, 20.0, 20000.0, duration);
-    await sleep(duration * 1000);
-    handle.silence_regular();
-    await sleep(500);
 
+    // Regular oscillator sweep
+    await handle.sweep_regular(type, 20.0, 10000.0, duration);
+    console.log(`Started regular ${type} sweep`);
+
+    // Wait slightly less than the full duration to account for fade out
+    await sleep((duration - 0.01) * 1000);
+    console.log('Finishing regular oscillator sweep');
+
+    // Start fade out slightly before the end
+    handle.silence_regular();
+    await sleep(20); // Wait for fade out
+
+    console.log(`Finished sweeping ${type} waveform for both oscillators.\n`);
     statusEl.textContent = `Finished sweeping ${type} waveform for both oscillators.`;
   }
 
+  console.log('All sweeps completed!');
   statusEl.textContent = 'All sweeps completed!';
 }
 
@@ -43,13 +67,15 @@ sweepButton.addEventListener('click', async () => {
     const wasm = await loadWasmModule();
 
     if (!handle) {
+      console.log('Initializing audio system...');
       handle = wasm.Handle.new();
       await handle.start();
+      console.log('Audio system initialized');
     }
 
     await performSweep();
   } catch (e) {
-    console.error(e);
-    statusEl.textContent = 'Error during sweep';
+    console.error('Error during sweep:', e);
+    statusEl.textContent = `Error during sweep: ${e.message}`;
   }
 });
