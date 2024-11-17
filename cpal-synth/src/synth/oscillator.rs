@@ -1,7 +1,9 @@
-use super::audio_node::AudioNode;
-use super::audio_param::AudioParam;
+// src/synth/oscillator.rs
+
+use crate::synth::audio_context::AudioContext;
+use crate::synth::audio_node::AudioNode;
+use crate::synth::audio_param::AudioParam;
 use std::f32::consts::PI;
-use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum OscillatorType {
@@ -30,12 +32,12 @@ impl Oscillator {
         }
     }
 
-    pub fn frequency(&mut self) -> &mut AudioParam {
-        &mut self.frequency
+    pub fn frequency(&self) -> &AudioParam {
+        &self.frequency
     }
 
-    pub fn gain(&mut self) -> &mut AudioParam {
-        &mut self.gain
+    pub fn gain(&self) -> &AudioParam {
+        &self.gain
     }
 
     fn poly_blep(&self, t: f32, dt: f32) -> f32 {
@@ -50,8 +52,8 @@ impl Oscillator {
         }
     }
 
-    fn process_bandlimited(&mut self, sample_rate: f32) -> f32 {
-        let freq = self.frequency.get_value();
+    fn process_bandlimited(&mut self, sample_rate: f32, current_sample: u64) -> f32 {
+        let freq = self.frequency.get_value(current_sample);
         let dt = freq / sample_rate;
 
         let output = match self.osc_type {
@@ -94,11 +96,27 @@ fn fmod(x: f32, y: f32) -> f32 {
 }
 
 impl AudioNode for Oscillator {
-    fn process(&mut self, sample_rate: f32) -> f32 {
-        self.process_bandlimited(sample_rate) * self.gain.get_value()
+    fn process(&mut self, context: &AudioContext, current_sample: u64) -> f32 {
+        let sample_rate = context.sample_rate();
+        let output = self.process_bandlimited(sample_rate, current_sample);
+        let final_output = output * self.gain.get_value(current_sample);
+
+        // Debug output every second
+        // if current_sample % (sample_rate as u64) == 0 {
+        //     println!(
+        //         "Oscillator {:?}: freq={:.1}Hz, gain={:.2}, phase={:.3}, output={:.3}",
+        //         self.osc_type,
+        //         self.frequency.get_value(current_sample),
+        //         self.gain.get_value(current_sample),
+        //         self.phase,
+        //         final_output
+        //     );
+        // }
+
+        final_output
     }
 
-    fn set_parameter(&mut self, name: &str, value: f32) {
+    fn set_parameter(&self, name: &str, value: f32) {
         match name {
             "frequency" => self.frequency.set_value(value),
             "gain" => self.gain.set_value(value),
@@ -106,10 +124,28 @@ impl AudioNode for Oscillator {
         }
     }
 
-    fn connect_input(&mut self, _name: &str, _node: Arc<Mutex<dyn AudioNode>>) {
+    fn connect_input(&mut self, _name: &str, _node: Box<dyn AudioNode + Send>) {
         // Oscillators don't have inputs
     }
+
     fn clear_input(&mut self, _input_name: &str) {
-        // No-op implementation for BandlimitedWavetableOscillator as it does not store inputs
+        // No-op implementation for oscillators as they do not store inputs
+    }
+
+    fn clone_box(&self) -> Box<dyn AudioNode + Send> {
+        Box::new(self.clone())
+    }
+}
+
+// Implement Clone for Oscillator
+impl Clone for Oscillator {
+    fn clone(&self) -> Self {
+        Self {
+            osc_type: self.osc_type,
+            frequency: self.frequency.clone(), // Use clone() instead of accessing private fields
+            gain: self.gain.clone(),           // Use clone() instead of accessing private fields
+            phase: self.phase,
+            triangle_state: self.triangle_state,
+        }
     }
 }

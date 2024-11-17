@@ -1,52 +1,90 @@
-use super::audio_node::AudioNode;
+use crate::synth::audio_context::AudioContext;
+use crate::synth::audio_node::AudioNode;
+use crate::synth::audio_param::AudioParam;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 pub struct AudioProcessor {
-    inputs: HashMap<String, Arc<Mutex<dyn AudioNode>>>,
-    processor_type: String,
-    parameters: HashMap<String, f32>,
+    gain: AudioParam,
+    inputs: HashMap<String, Box<dyn AudioNode + Send>>,
 }
 
 impl AudioProcessor {
-    pub fn new(processor_type: &str) -> Self {
+    pub fn new(_type: &str) -> Self {
+        println!("Creating new AudioProcessor");
         Self {
+            gain: AudioParam::new(1.0, 0.0, 1.0),
             inputs: HashMap::new(),
-            processor_type: processor_type.to_string(),
-            parameters: HashMap::new(),
         }
+    }
+
+    pub fn gain(&self) -> &AudioParam {
+        &self.gain
+    }
+
+    // Public method that delegates to the trait method
+    pub fn set_parameter(&self, name: &str, value: f32) {
+        println!("Setting parameter {} to {}", name, value);
+        AudioNode::set_parameter(self, name, value)
     }
 }
 
 impl AudioNode for AudioProcessor {
-    fn process(&mut self, sample_rate: f32) -> f32 {
-        match self.processor_type.as_str() {
-            "gain" => {
-                let mut sum = 0.0;
+    fn process(&mut self, context: &AudioContext, current_sample: u64) -> f32 {
+        // Sum all inputs
+        let input_signal: f32 = self
+            .inputs
+            .values_mut()
+            .map(|node| node.process(context, current_sample))
+            .sum();
 
-                // Process all inputs and sum them
-                for input in self.inputs.values() {
-                    if let Ok(mut node) = input.lock() {
-                        sum += node.process(sample_rate);
-                    }
-                }
+        let gain = self.gain.get_value(current_sample);
+        let output = input_signal * gain;
 
-                let gain = self.parameters.get("gain").copied().unwrap_or(1.0);
-                sum * gain
-            }
-            _ => 0.0,
+        // Debug output every second (assuming 44.1kHz sample rate)
+        // if current_sample % 44100 == 0 {
+        //     println!(
+        //         "AudioProcessor: inputs={}, input_signal={:.3}, gain={:.3}, output={:.3}",
+        //         self.inputs.len(),
+        //         input_signal,
+        //         gain,
+        //         output
+        //     );
+        // }
+
+        output
+    }
+
+    fn set_parameter(&self, name: &str, value: f32) {
+        match name {
+            "gain" => self.gain.set_value(value),
+            _ => println!("Unknown parameter: {}", name),
         }
     }
 
-    fn set_parameter(&mut self, name: &str, value: f32) {
-        self.parameters.insert(name.to_string(), value);
-    }
-
-    fn connect_input(&mut self, name: &str, node: Arc<Mutex<dyn AudioNode>>) {
+    fn connect_input(&mut self, name: &str, node: Box<dyn AudioNode + Send>) {
+        println!(
+            "AudioProcessor: Connecting input '{}' (total inputs: {})",
+            name,
+            self.inputs.len() + 1
+        );
         self.inputs.insert(name.to_string(), node);
     }
 
     fn clear_input(&mut self, input_name: &str) {
+        println!("AudioProcessor: Clearing input '{}'", input_name);
         self.inputs.remove(input_name);
+    }
+
+    fn clone_box(&self) -> Box<dyn AudioNode + Send> {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for AudioProcessor {
+    fn clone(&self) -> Self {
+        Self {
+            gain: self.gain.clone(),
+            inputs: self.inputs.clone(),
+        }
     }
 }

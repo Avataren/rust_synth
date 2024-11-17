@@ -1,6 +1,8 @@
+// src/lib.rs
+
 use cpal_synth::{
-    initialize_wave_banks, AudioGraph, AudioNode, AudioProcessor, BandlimitedWavetableOscillator,
-    Oscillator, OscillatorType,
+    initialize_wave_banks, AudioGraph, AudioProcessor, BandlimitedWavetableOscillator, Oscillator,
+    OscillatorType,
 };
 use std::sync::{Arc, Mutex};
 use wasm_bindgen::prelude::*;
@@ -8,7 +10,14 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen(start)]
 pub fn main_js() -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
-    initialize_wave_banks().map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    // Initialize the audio graph
+    let graph = AudioGraph::new().map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let context = graph.context.clone();
+
+    // Initialize wave banks with the audio context
+    initialize_wave_banks(&context).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
     Ok(())
 }
 
@@ -27,13 +36,17 @@ impl Handle {
     #[wasm_bindgen]
     pub fn new() -> Result<Handle, JsValue> {
         let mut graph = AudioGraph::new().map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let context = graph.context.clone();
+
+        // Initialize wave banks
+        initialize_wave_banks(&context).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         let master_gain = Arc::new(Mutex::new(AudioProcessor::new("gain")));
-        graph.add_node("master_gain", master_gain.clone());
+        graph.add_node("master_gain", Box::new(master_gain.clone()));
         graph.set_output("master_gain");
 
-        if let Ok(mut gain) = master_gain.try_lock() {
-            gain.set_parameter("gain", 1.0);
+        if let Ok(gain_node) = master_gain.try_lock() {
+            gain_node.set_parameter("gain", 1.0);
         }
 
         Ok(Handle {
@@ -44,44 +57,6 @@ impl Handle {
             wavetable_osc: None,
             regular_osc: None,
         })
-    }
-
-    #[wasm_bindgen]
-    pub fn set_wavetable_frequency(&mut self, freq: f32) {
-        if let Some(osc) = &self.wavetable_osc {
-            if let Ok(mut osc) = osc.try_lock() {
-                osc.frequency().set_value(freq);
-            }
-        }
-    }
-
-    #[wasm_bindgen]
-    pub fn set_wavetable_frequency_ramp(&mut self, freq: f32, duration_seconds: f32) {
-        if let Some(osc) = &self.wavetable_osc {
-            if let Ok(mut osc) = osc.try_lock() {
-                osc.frequency()
-                    .exponential_ramp_to_value_at_time(freq, duration_seconds);
-            }
-        }
-    }
-
-    #[wasm_bindgen]
-    pub fn set_regular_frequency(&mut self, freq: f32) {
-        if let Some(osc) = &self.regular_osc {
-            if let Ok(mut osc) = osc.try_lock() {
-                osc.frequency().set_value(freq);
-            }
-        }
-    }
-
-    #[wasm_bindgen]
-    pub fn set_regular_frequency_ramp(&mut self, freq: f32, duration_seconds: f32) {
-        if let Some(osc) = &self.regular_osc {
-            if let Ok(mut osc) = osc.try_lock() {
-                osc.frequency()
-                    .exponential_ramp_to_value_at_time(freq, duration_seconds);
-            }
-        }
     }
 
     #[wasm_bindgen]
@@ -107,8 +82,9 @@ impl Handle {
             _ => return Err(JsValue::from_str("Invalid oscillator type")),
         };
 
+        let context = self.graph.context.clone();
         let wavetable_osc = Arc::new(Mutex::new(
-            BandlimitedWavetableOscillator::new(osc_type)
+            BandlimitedWavetableOscillator::new(osc_type, &context)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?,
         ));
         let wavetable_gain = Arc::new(Mutex::new(AudioProcessor::new("gain")));
@@ -117,17 +93,25 @@ impl Handle {
         if let Ok(mut osc) = wavetable_osc.try_lock() {
             osc.frequency().set_value(start_freq);
             osc.gain().set_value(1.0);
-            osc.frequency()
-                .exponential_ramp_to_value_at_time(end_freq, duration);
+
+            let current_sample = self.graph.context.current_sample();
+            let sample_rate = self.graph.context.sample_rate();
+            osc.frequency().exponential_ramp_to_value_at_time(
+                end_freq,
+                duration,
+                current_sample,
+                sample_rate,
+            );
         }
 
-        if let Ok(mut gain) = wavetable_gain.try_lock() {
-            gain.set_parameter("gain", 0.5);
+        if let Ok(gain_node) = wavetable_gain.try_lock() {
+            gain_node.set_parameter("gain", 0.5);
         }
 
-        self.graph.add_node("wavetable_osc", wavetable_osc.clone());
         self.graph
-            .add_node("wavetable_gain", wavetable_gain.clone());
+            .add_node("wavetable_osc", Box::new(wavetable_osc.clone()));
+        self.graph
+            .add_node("wavetable_gain", Box::new(wavetable_gain.clone()));
 
         self.graph
             .connect("wavetable_osc", "wavetable_gain", "input");
@@ -162,16 +146,25 @@ impl Handle {
         if let Ok(mut osc) = regular_osc.try_lock() {
             osc.frequency().set_value(start_freq);
             osc.gain().set_value(1.0);
-            osc.frequency()
-                .exponential_ramp_to_value_at_time(end_freq, duration);
+
+            let current_sample = self.graph.context.current_sample();
+            let sample_rate = self.graph.context.sample_rate();
+            osc.frequency().exponential_ramp_to_value_at_time(
+                end_freq,
+                duration,
+                current_sample,
+                sample_rate,
+            );
         }
 
-        if let Ok(mut gain) = regular_gain.try_lock() {
-            gain.set_parameter("gain", 0.5);
+        if let Ok(gain_node) = regular_gain.try_lock() {
+            gain_node.set_parameter("gain", 0.5);
         }
 
-        self.graph.add_node("regular_osc", regular_osc.clone());
-        self.graph.add_node("regular_gain", regular_gain.clone());
+        self.graph
+            .add_node("regular_osc", Box::new(regular_osc.clone()));
+        self.graph
+            .add_node("regular_gain", Box::new(regular_gain.clone()));
 
         self.graph.connect("regular_osc", "regular_gain", "input");
         self.graph.connect("regular_gain", "master_gain", "input2");
@@ -184,12 +177,18 @@ impl Handle {
     #[wasm_bindgen]
     pub fn set_wavetable_gain(&mut self, value: f32, duration: Option<f32>) {
         if let Some(gain) = &self.wavetable_gain {
-            if let Ok(mut gain) = gain.try_lock() {
+            if let Ok(gain_node) = gain.try_lock() {
                 if let Some(duration) = duration {
-                    // Linear ramp for gain changes
-                    gain.set_parameter("gain", value);
+                    let current_sample = self.graph.context.current_sample();
+                    let sample_rate = self.graph.context.sample_rate();
+                    gain_node.gain().linear_ramp_to_value_at_time(
+                        value,
+                        duration,
+                        current_sample,
+                        sample_rate,
+                    );
                 } else {
-                    gain.set_parameter("gain", value);
+                    gain_node.set_parameter("gain", value);
                 }
             }
         }
@@ -198,12 +197,18 @@ impl Handle {
     #[wasm_bindgen]
     pub fn set_regular_gain(&mut self, value: f32, duration: Option<f32>) {
         if let Some(gain) = &self.regular_gain {
-            if let Ok(mut gain) = gain.try_lock() {
+            if let Ok(gain_node) = gain.try_lock() {
                 if let Some(duration) = duration {
-                    // Linear ramp for gain changes
-                    gain.set_parameter("gain", value);
+                    let current_sample = self.graph.context.current_sample();
+                    let sample_rate = self.graph.context.sample_rate();
+                    gain_node.gain().linear_ramp_to_value_at_time(
+                        value,
+                        duration,
+                        current_sample,
+                        sample_rate,
+                    );
                 } else {
-                    gain.set_parameter("gain", value);
+                    gain_node.set_parameter("gain", value);
                 }
             }
         }

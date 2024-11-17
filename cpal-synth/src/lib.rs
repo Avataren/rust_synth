@@ -1,7 +1,9 @@
+// lib.rs
+
 // First, make the synth module public
 pub mod synth {
     // Re-export public types from each module
-    pub use self::audio_context::{AudioContext, AUDIO_CONTEXT};
+    pub use self::audio_context::AudioContext;
     pub use self::audio_graph::AudioGraph;
     pub use self::audio_node::AudioNode; // Make the trait public
     pub use self::audio_param::AudioParam;
@@ -10,18 +12,19 @@ pub mod synth {
     };
     pub use self::oscillator::{Oscillator, OscillatorType};
     pub use self::processor::AudioProcessor;
+
     // Declare the modules
-    mod audio_context;
-    mod audio_graph;
+    pub mod audio_context; // Make this public if needed
+    pub mod audio_graph;
     pub mod audio_node; // Make this public
-    mod audio_param;
-    mod bandlimited_wavetableoscillator;
-    mod oscillator;
-    mod processor;
+    pub mod audio_param;
+    pub mod bandlimited_wavetableoscillator;
+    pub mod oscillator;
+    pub mod processor;
 }
 
 // Re-export everything at the crate root level
 pub use synth::{
-    initialize_wave_banks, AudioContext, AudioGraph, AudioNode, AudioProcessor,
-    BandlimitedWavetableOscillator, Oscillator, OscillatorType, AUDIO_CONTEXT,
+    initialize_wave_banks, AudioContext, AudioGraph, AudioNode, AudioParam, AudioProcessor,
+    BandlimitedWavetableOscillator, Oscillator, OscillatorType,
 };

@@ -1,4 +1,7 @@
-use super::audio_context::AUDIO_CONTEXT;
+// src/synth/audio_param.rs
+
+use crossbeam::atomic::AtomicCell;
+use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, Copy)]
 pub enum RampType {
@@ -7,129 +10,146 @@ pub enum RampType {
 }
 
 #[derive(Debug, Clone)]
-struct RampEvent {
-    start_value: f32,
-    end_value: f32,
-    start_sample: u64,
-    duration_samples: u64,
-    ramp_type: RampType,
+pub struct RampEvent {
+    pub start_value: f32,
+    pub end_value: f32,
+    pub start_sample: u64,
+    pub duration_samples: u64,
+    pub ramp_type: RampType,
 }
 
 pub struct AudioParam {
-    current_value: f32,
+    current_value: AtomicCell<f32>,
     default_value: f32,
     min_value: f32,
     max_value: f32,
-    events: Vec<RampEvent>,
+    events: Arc<RwLock<Vec<RampEvent>>>,
+}
+
+impl Clone for AudioParam {
+    fn clone(&self) -> Self {
+        // Deep clone events if needed
+        let events_clone = {
+            let events = self.events.read().unwrap();
+            events.clone()
+        };
+
+        Self {
+            current_value: AtomicCell::new(self.current_value.load()),
+            default_value: self.default_value,
+            min_value: self.min_value,
+            max_value: self.max_value,
+            events: Arc::new(RwLock::new(events_clone)),
+        }
+    }
 }
 
 impl AudioParam {
     pub fn new(default_value: f32, min_value: f32, max_value: f32) -> Self {
         Self {
-            current_value: default_value,
+            current_value: AtomicCell::new(default_value),
             default_value,
             min_value,
             max_value,
-            events: Vec::new(),
+            events: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
-    pub fn set_value(&mut self, value: f32) {
-        self.current_value = self.clamp_value(value);
-        self.events.clear();
-    }
-
-    pub fn set_value_at_time(&mut self, value: f32, time: f64) {
+    pub fn set_value(&self, value: f32) {
         let value = self.clamp_value(value);
-        if let Ok(context) = AUDIO_CONTEXT.lock() {
-            let sample_offset = (time * context.sample_rate() as f64) as u64;
-            let current_sample = context.current_sample();
-            self.events.push(RampEvent {
-                start_value: self.current_value,
-                end_value: value,
-                start_sample: current_sample + sample_offset,
-                duration_samples: 0,
-                ramp_type: RampType::Linear,
-            });
-        }
+        self.current_value.store(value);
     }
 
-    pub fn linear_ramp_to_value_at_time(&mut self, value: f32, duration_seconds: f32) {
+    pub fn exponential_ramp_to_value_at_time(
+        &self,
+        value: f32,
+        duration_seconds: f32,
+        start_sample: u64,
+        sample_rate: f32,
+    ) {
         let value = self.clamp_value(value);
-        if let Ok(context) = AUDIO_CONTEXT.lock() {
-            let duration_samples = (duration_seconds * context.sample_rate()) as u64;
-            let current_sample = context.current_sample();
-            self.events.push(RampEvent {
-                start_value: self.current_value,
-                end_value: value,
-                start_sample: current_sample,
-                duration_samples,
-                ramp_type: RampType::Linear,
-            });
-        }
-    }
+        let duration_samples = ((duration_seconds * sample_rate) as u64).max(1);
 
-    pub fn exponential_ramp_to_value_at_time(&mut self, value: f32, duration_seconds: f32) {
-        let value = self.clamp_value(value.max(0.00001));
-        if let Ok(context) = AUDIO_CONTEXT.lock() {
-            let duration_samples = (duration_seconds * context.sample_rate()) as u64;
-            let current_sample = context.current_sample();
-            self.events.push(RampEvent {
-                start_value: self.current_value.max(0.00001),
-                end_value: value,
-                start_sample: current_sample,
-                duration_samples,
-                ramp_type: RampType::Exponential,
-            });
-        }
-    }
+        let start_value = self.current_value.load();
 
-    pub fn get_value(&mut self) -> f32 {
-        let current_sample = if let Ok(context) = AUDIO_CONTEXT.lock() {
-            context.current_sample()
-        } else {
-            return self.current_value;
+        let event = RampEvent {
+            start_value,
+            end_value: value,
+            start_sample,
+            duration_samples,
+            ramp_type: RampType::Exponential,
         };
 
-        if let Some(event) = self.events.first() {
-            let samples_elapsed = current_sample.saturating_sub(event.start_sample);
+        let mut events = self.events.write().unwrap();
+        events.push(event);
+    }
 
-            if samples_elapsed >= event.duration_samples {
-                // Event is complete
-                self.current_value = event.end_value;
-                self.events.remove(0);
-            } else if event.duration_samples > 0 {
-                // Event is in progress
-                let t = samples_elapsed as f32 / event.duration_samples as f32;
-                self.current_value = match event.ramp_type {
+    pub fn linear_ramp_to_value_at_time(
+        &self,
+        value: f32,
+        duration_seconds: f32,
+        start_sample: u64,
+        sample_rate: f32,
+    ) {
+        let value = self.clamp_value(value);
+        let duration_samples = ((duration_seconds * sample_rate) as u64).max(1);
+
+        let start_value = self.current_value.load();
+
+        let event = RampEvent {
+            start_value,
+            end_value: value,
+            start_sample,
+            duration_samples,
+            ramp_type: RampType::Linear,
+        };
+
+        let mut events = self.events.write().unwrap();
+        events.push(event);
+    }
+
+    pub fn get_value(&self, current_sample: u64) -> f32 {
+        let mut value = self.current_value.load();
+
+        let events = self.events.read().unwrap();
+
+        for event in events.iter() {
+            if current_sample >= event.start_sample
+                && current_sample < event.start_sample + event.duration_samples
+            {
+                let t =
+                    (current_sample - event.start_sample) as f32 / event.duration_samples as f32;
+
+                value = match event.ramp_type {
                     RampType::Linear => {
-                        event.start_value + (event.end_value - event.start_value) * t
+                        let delta = event.end_value - event.start_value;
+                        event.start_value + delta * t
                     }
                     RampType::Exponential => {
-                        event.start_value * (event.end_value / event.start_value).powf(t)
+                        let start = event.start_value.max(0.00001);
+                        let end = event.end_value.max(0.00001);
+                        start * (end / start).powf(t)
                     }
                 };
-            } else {
-                // Immediate value change
-                self.current_value = event.end_value;
-                self.events.remove(0);
+                break;
+            } else if current_sample >= event.start_sample + event.duration_samples {
+                // Event has completed; set to end_value
+                value = event.end_value;
             }
         }
 
-        self.current_value
+        value
     }
 
-    pub fn reset(&mut self) {
-        self.current_value = self.default_value;
-        self.events.clear();
+    pub fn cancel_scheduled_values(&self) {
+        let mut events = self.events.write().unwrap();
+        events.clear();
     }
 
-    pub fn default_value(&self) -> f32 {
-        self.default_value
-    }
-
-    pub fn cancel_scheduled_values(&mut self) {
-        self.events.clear();
+    pub fn reset(&self) {
+        self.current_value.store(self.default_value);
+        let mut events = self.events.write().unwrap();
+        events.clear();
     }
 
     fn clamp_value(&self, value: f32) -> f32 {

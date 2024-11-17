@@ -1,13 +1,35 @@
-use super::audio_context::AUDIO_CONTEXT;
-use super::audio_node::AudioNode;
-use super::audio_param::AudioParam;
-use super::oscillator::OscillatorType;
+use crate::synth::audio_context::AudioContext;
+use crate::synth::audio_node::AudioNode;
+use crate::synth::audio_param::AudioParam;
+use crate::synth::oscillator::OscillatorType;
 use lazy_static::lazy_static;
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-// Move the lazy_static definition outside any struct/impl blocks
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
+// Constants for wavetable generation
+const OVERSAMPLE: usize = 2;
+const BASE_FREQ: f32 = 20.0;
+const MIN_TABLE_SIZE: usize = 64;
+
+#[derive(Debug)]
+struct WaveTable {
+    wave_table: Arc<Vec<f32>>,
+    top_freq: f32,
+    table_mask: usize, // For power-of-2 size tables
+    table_size: usize,
+}
+
+#[derive(Debug)]
+struct WaveTableBank {
+    tables: Vec<WaveTable>,
+    sample_rate: f32,
+    frequency_bounds: Vec<f32>, // Pre-computed frequency boundaries
+}
+
 lazy_static! {
     static ref WAVETABLE_BANKS: Mutex<HashMap<(OscillatorType, u32), Arc<WaveTableBank>>> = {
         let m = HashMap::new();
@@ -15,89 +37,33 @@ lazy_static! {
     };
 }
 
-pub fn initialize_wave_banks() -> anyhow::Result<()> {
-    let sample_rate = AUDIO_CONTEXT
-        .lock()
-        .map_err(|_| anyhow::anyhow!("Failed to acquire audio context lock"))?
-        .sample_rate();
-
-    let sample_rate_key = sample_rate as u32;
-
-    let oscillator_types = [
-        OscillatorType::Sine,
-        OscillatorType::Square,
-        OscillatorType::Sawtooth,
-        OscillatorType::Triangle,
-    ];
-
-    let mut banks = WAVETABLE_BANKS
-        .lock()
-        .map_err(|_| anyhow::anyhow!("Failed to acquire wavetable banks lock"))?;
-
-    for &osc_type in &oscillator_types {
-        let key = (osc_type, sample_rate_key);
-        if !banks.contains_key(&key) {
-            println!(
-                "Initializing wave bank for {:?} at {}Hz",
-                osc_type, sample_rate_key
-            );
-            let bank = Arc::new(WaveTableBank::new(osc_type, sample_rate));
-            banks.insert(key, bank);
-        } else {
-            println!(
-                "Wave bank for {:?} at {}Hz already initialized",
-                osc_type, sample_rate_key
-            );
-        }
-    }
-
-    Ok(())
-}
-
-#[derive(Debug)]
-struct WaveTable {
-    wave_table: Arc<Vec<f32>>,
-    top_freq: f32,
-}
-
-#[derive(Debug)]
-struct WaveTableBank {
-    tables: Vec<WaveTable>,
-    sample_rate: f32,
-}
-
 impl WaveTableBank {
     fn new(waveform: OscillatorType, sample_rate: f32) -> Self {
-        const BASE_FREQ: f32 = 20.0;
-        const OVERSAMP: usize = 2;
-
         let max_harmonics = (sample_rate / (3.0 * BASE_FREQ)) as usize;
 
-        let mut v = max_harmonics;
-        v = v.saturating_sub(1);
-        v |= v >> 1;
-        v |= v >> 2;
-        v |= v >> 4;
-        v |= v >> 8;
-        v |= v >> 16;
-        v += 1;
+        // Find next power of 2
+        let mut table_len = MIN_TABLE_SIZE;
+        while table_len < max_harmonics * 2 * OVERSAMPLE {
+            table_len *= 2;
+        }
 
-        let table_len = v * 2 * OVERSAMP;
         let mut planner = FftPlanner::new();
         let fft = planner.plan_fft_forward(table_len);
 
         let mut tables = Vec::new();
+        let mut frequency_bounds = Vec::new();
         let mut harmonics = max_harmonics;
         let mut top_freq = BASE_FREQ * 2.0 / sample_rate;
 
         while harmonics >= 1 {
             let table = Self::create_wavetable(table_len, harmonics, waveform, top_freq, &fft);
+            frequency_bounds.push(top_freq * sample_rate);
             tables.push(table);
             harmonics >>= 1;
             top_freq *= 2.0;
         }
 
-        // Normalize all tables...
+        // Normalize all tables
         let global_max = tables
             .iter()
             .flat_map(|table| table.wave_table.iter())
@@ -105,10 +71,11 @@ impl WaveTableBank {
 
         if global_max > 0.0 {
             for table in &mut tables {
-                let mut normalized = Vec::with_capacity(table.wave_table.len());
-                for &sample in table.wave_table.iter() {
-                    normalized.push(sample / global_max);
-                }
+                let normalized: Vec<f32> = table
+                    .wave_table
+                    .iter()
+                    .map(|&sample| sample / global_max)
+                    .collect();
                 table.wave_table = Arc::new(normalized);
             }
         }
@@ -116,6 +83,7 @@ impl WaveTableBank {
         Self {
             tables,
             sample_rate,
+            frequency_bounds,
         }
     }
 
@@ -160,10 +128,85 @@ impl WaveTableBank {
 
         fft.process(&mut spectrum);
 
+        // Create table with padding for interpolation
+        let mut wave_table: Vec<f32> = spectrum.iter().map(|c| c.im).collect();
+        wave_table.push(wave_table[0]); // Add padding for interpolation
+
         WaveTable {
-            wave_table: Arc::new(spectrum.iter().map(|c| c.im).collect()),
+            wave_table: Arc::new(wave_table),
             top_freq,
+            table_mask: len - 1,
+            table_size: len,
         }
+    }
+
+    #[inline]
+    fn find_table_index(&self, freq: f32) -> usize {
+        match self
+            .frequency_bounds
+            .binary_search_by(|&bound| bound.partial_cmp(&freq).unwrap())
+        {
+            Ok(index) => index,
+            Err(index) => index.min(self.tables.len() - 1),
+        }
+    }
+}
+
+pub fn initialize_wave_banks(context: &AudioContext) -> anyhow::Result<()> {
+    let sample_rate = context.sample_rate();
+    let sample_rate_key = sample_rate as u32;
+
+    let oscillator_types = [
+        OscillatorType::Sine,
+        OscillatorType::Square,
+        OscillatorType::Sawtooth,
+        OscillatorType::Triangle,
+    ];
+
+    // Single lock acquisition for the entire initialization
+    let mut banks = WAVETABLE_BANKS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Failed to acquire wavetable banks lock"))?;
+
+    // Pre-allocate with capacity
+    if banks.is_empty() {
+        banks.reserve(oscillator_types.len());
+    }
+
+    for &osc_type in &oscillator_types {
+        let key = (osc_type, sample_rate_key);
+        if !banks.contains_key(&key) {
+            println!(
+                "Initializing wave bank for {:?} at {}Hz",
+                osc_type, sample_rate_key
+            );
+            let bank = Arc::new(WaveTableBank::new(osc_type, sample_rate));
+            banks.insert(key, bank);
+        } else {
+            println!(
+                "Wave bank for {:?} at {}Hz already initialized",
+                osc_type, sample_rate_key
+            );
+        }
+    }
+
+    Ok(())
+}
+
+// New helper function to check if banks are initialized
+pub fn are_wave_banks_initialized(sample_rate: f32) -> bool {
+    if let Ok(banks) = WAVETABLE_BANKS.lock() {
+        let sample_rate_key = sample_rate as u32;
+        [
+            OscillatorType::Sine,
+            OscillatorType::Square,
+            OscillatorType::Sawtooth,
+            OscillatorType::Triangle,
+        ]
+        .iter()
+        .all(|&osc_type| banks.contains_key(&(osc_type, sample_rate_key)))
+    } else {
+        false
     }
 }
 
@@ -174,15 +217,21 @@ pub struct BandlimitedWavetableOscillator {
     phase: f32,
     phase_increment: f32,
     current_table: usize,
+    last_freq: f32,
+    interpolation_mode: InterpolationType,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum InterpolationType {
+    Linear,
+    Cubic,
+    #[cfg(target_arch = "x86_64")]
+    Simd,
 }
 
 impl BandlimitedWavetableOscillator {
-    pub fn new(waveform: OscillatorType) -> anyhow::Result<Self> {
-        let sample_rate = AUDIO_CONTEXT
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire audio context lock"))?
-            .sample_rate();
-
+    pub fn new(waveform: OscillatorType, context: &AudioContext) -> anyhow::Result<Self> {
+        let sample_rate = context.sample_rate();
         let sample_rate_key = sample_rate as u32;
 
         let bank = {
@@ -192,16 +241,8 @@ impl BandlimitedWavetableOscillator {
 
             let key = (waveform, sample_rate_key);
             if let Some(bank) = banks.get(&key) {
-                println!(
-                    "Reusing existing wavetables for {:?} at {}Hz",
-                    waveform, sample_rate_key
-                );
                 bank.clone()
             } else {
-                println!(
-                    "Creating new wavetables for {:?} at {}Hz",
-                    waveform, sample_rate_key
-                );
                 let bank = Arc::new(WaveTableBank::new(waveform, sample_rate));
                 banks.insert(key, bank.clone());
                 bank
@@ -215,50 +256,95 @@ impl BandlimitedWavetableOscillator {
             phase: 0.0,
             phase_increment: 0.0,
             current_table: 0,
+            last_freq: 0.0,
+            interpolation_mode: InterpolationType::Linear,
         })
     }
-    pub fn frequency(&mut self) -> &mut AudioParam {
-        &mut self.frequency
+
+    pub fn frequency(&self) -> &AudioParam {
+        &self.frequency
     }
 
-    pub fn gain(&mut self) -> &mut AudioParam {
-        &mut self.gain
+    pub fn gain(&self) -> &AudioParam {
+        &self.gain
+    }
+
+    pub fn set_interpolation_mode(&mut self, mode: InterpolationType) {
+        self.interpolation_mode = mode;
+    }
+
+    #[inline(always)]
+    fn linear_interpolate(&self, table: &[f32], idx: usize, frac: f32) -> f32 {
+        let sample0 = table[idx];
+        let sample1 = table[idx + 1];
+        sample0 + (sample1 - sample0) * frac
+    }
+
+    #[inline(always)]
+    fn cubic_interpolate(&self, table: &[f32], idx: usize, frac: f32) -> f32 {
+        let y0 = table[idx.wrapping_sub(1) & self.bank.tables[self.current_table].table_mask];
+        let y1 = table[idx];
+        let y2 = table[idx + 1];
+        let y3 = table[idx + 2];
+
+        let mu2 = frac * frac;
+        let a0 = y3 - y2 - y0 + y1;
+        let a1 = y0 - y1 - a0;
+        let a2 = y2 - y0;
+        let a3 = y1;
+
+        a0 * frac * mu2 + a1 * mu2 + a2 * frac + a3
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn simd_interpolate(&self, table: &[f32], idx: usize, frac: f32) -> f32 {
+        let samples = _mm_set_ps(0.0, 0.0, table[idx + 1], table[idx]);
+        let factors = _mm_set_ps(0.0, 0.0, frac, 1.0 - frac);
+        let result = _mm_dp_ps(samples, factors, 0x31);
+        _mm_cvtss_f32(result)
     }
 }
 
 impl AudioNode for BandlimitedWavetableOscillator {
-    fn process(&mut self, sample_rate: f32) -> f32 {
-        let freq = self.frequency.get_value();
-        self.phase_increment = freq / sample_rate;
+    fn process(&mut self, context: &AudioContext, current_sample: u64) -> f32 {
+        let freq = self.frequency.get_value(current_sample);
 
-        self.current_table = 0;
-        while (self.phase_increment >= self.bank.tables[self.current_table].top_freq)
-            && (self.current_table < (self.bank.tables.len() - 1))
-        {
-            self.current_table += 1;
+        // Update phase increment and table selection only if frequency changed
+        if freq != self.last_freq {
+            self.phase_increment = freq / context.sample_rate();
+            self.last_freq = freq;
+            self.current_table = self.bank.find_table_index(freq);
         }
 
         let table = &self.bank.tables[self.current_table].wave_table;
-        let table_size = table.len() as f32;
+        let table_size = self.bank.tables[self.current_table].table_size as f32;
+        let table_mask = self.bank.tables[self.current_table].table_mask;
 
+        // Calculate table indices
         let temp = self.phase * table_size;
         let int_part = temp as usize;
         let frac_part = temp - int_part as f32;
+        let idx = int_part & table_mask;
 
-        let sample0 = table[int_part % table.len()];
-        let sample1 = table[(int_part + 1) % table.len()];
+        // Interpolate based on selected mode
+        let output = match self.interpolation_mode {
+            InterpolationType::Linear => self.linear_interpolate(table, idx, frac_part),
+            InterpolationType::Cubic => self.cubic_interpolate(table, idx, frac_part),
+            #[cfg(target_arch = "x86_64")]
+            InterpolationType::Simd => unsafe { self.simd_interpolate(table, idx, frac_part) },
+        };
 
-        let output = sample0 + (sample1 - sample0) * frac_part;
-
+        // Update phase
         self.phase += self.phase_increment;
         if self.phase >= 1.0 {
             self.phase -= 1.0;
         }
 
-        output * self.gain.get_value()
+        output * self.gain.get_value(current_sample)
     }
 
-    fn set_parameter(&mut self, name: &str, value: f32) {
+    fn set_parameter(&self, name: &str, value: f32) {
         match name {
             "frequency" => self.frequency.set_value(value),
             "gain" => self.gain.set_value(value),
@@ -266,8 +352,30 @@ impl AudioNode for BandlimitedWavetableOscillator {
         }
     }
 
-    fn connect_input(&mut self, _name: &str, _node: Arc<Mutex<dyn AudioNode>>) {}
+    fn connect_input(&mut self, _name: &str, _node: Box<dyn AudioNode + Send>) {
+        // Oscillators don't have inputs
+    }
+
     fn clear_input(&mut self, _input_name: &str) {
-        // No-op implementation for BandlimitedWavetableOscillator as it does not store inputs
+        // No-op for oscillators
+    }
+
+    fn clone_box(&self) -> Box<dyn AudioNode + Send> {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for BandlimitedWavetableOscillator {
+    fn clone(&self) -> Self {
+        Self {
+            bank: self.bank.clone(),
+            frequency: self.frequency.clone(),
+            gain: self.gain.clone(),
+            phase: self.phase,
+            phase_increment: self.phase_increment,
+            current_table: self.current_table,
+            last_freq: self.last_freq,
+            interpolation_mode: self.interpolation_mode,
+        }
     }
 }
