@@ -4,9 +4,11 @@ use crate::synth::processor::AudioProcessor;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 #[cfg(feature = "cpal-output")]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::BufferSize;
 #[cfg(feature = "cpal-output")]
 use cpal::{FromSample, Sample};
 
@@ -115,6 +117,13 @@ impl AudioGraph {
     ) where
         T: Sample + FromSample<f32> + Send,
     {
+        let num_frames = output.len() / channels;
+        println!(
+            "Received buffer size: {} ({} frames)",
+            output.len(),
+            num_frames
+        );
+
         if !playing.load(Ordering::SeqCst) {
             for sample in output.iter_mut() {
                 *sample = T::EQUILIBRIUM;
@@ -122,19 +131,12 @@ impl AudioGraph {
             return;
         }
 
-        let num_frames = output.len() / channels;
         let base_sample = context.current_sample();
 
-        // Process audio data
         for (frame_index, frame) in output.chunks_mut(channels).enumerate() {
             let current_sample = base_sample + frame_index as u64;
 
             let sample_value = output_node.process(&*context, current_sample);
-
-            // Debug every second (assuming 44.1kHz)
-            // if current_sample % 44100 == 0 {
-            //     println!("Output sample value: {}", sample_value);
-            // }
 
             let sample_value = T::from_sample(sample_value);
             for sample in frame.iter_mut() {
@@ -145,7 +147,73 @@ impl AudioGraph {
         context.increment_samples(num_frames as u64);
     }
 
-    pub fn start(&mut self) -> anyhow::Result<()> {
+    // #[cfg(feature = "cpal-output")]
+    // fn write_data<T>(
+    //     output: &mut [T],
+    //     channels: usize,
+    //     playing: &Arc<AtomicBool>,
+    //     output_node: &mut dyn AudioNode,
+    //     context: Arc<AudioContext>,
+    // ) where
+    //     T: Sample + FromSample<f32> + Send,
+    // {
+    //     use std::time::Instant;
+
+    //     if !playing.load(Ordering::SeqCst) {
+    //         for sample in output.iter_mut() {
+    //             *sample = T::EQUILIBRIUM;
+    //         }
+    //         return;
+    //     }
+
+    //     let num_frames = output.len() / channels;
+    //     let sample_rate = context.sample_rate(); // Ensure this method provides sample rate in Hz
+    //     let buffer_duration = num_frames as f32 / sample_rate;
+
+    //     // Start timing
+    //     let start_time = Instant::now();
+
+    //     let base_sample = context.current_sample();
+
+    //     // Process audio data
+    //     for (frame_index, frame) in output.chunks_mut(channels).enumerate() {
+    //         let current_sample = base_sample + frame_index as u64;
+
+    //         let sample_value = output_node.process(&*context, current_sample);
+
+    //         let sample_value = T::from_sample(sample_value);
+    //         for sample in frame.iter_mut() {
+    //             *sample = sample_value;
+    //         }
+    //     }
+
+    //     context.increment_samples(num_frames as u64);
+
+    //     // Stop timing
+    //     let processing_time = start_time.elapsed();
+    //     let processing_time_secs = processing_time.as_secs_f32();
+
+    //     // Compute CPU usage
+    //     let cpu_usage = (processing_time_secs / buffer_duration) * 100.0;
+
+    //     // Log CPU usage
+    //     println!(
+    //         "Processed buffer of {} frames in {:.3} ms (CPU Usage: {:.2}%)",
+    //         num_frames,
+    //         processing_time_secs * 1000.0,
+    //         cpu_usage
+    //     );
+
+    //     // Optional: Warn if close to underrun
+    //     if cpu_usage > 80.0 {
+    //         eprintln!(
+    //             "Warning: High CPU usage detected ({:.2}%). Risk of buffer underrun!",
+    //             cpu_usage
+    //         );
+    //     }
+    // }
+
+    pub fn start(&mut self, buffer_size: Option<usize>) -> anyhow::Result<()> {
         println!("Starting audio graph");
         #[cfg(feature = "cpal-output")]
         {
@@ -154,10 +222,23 @@ impl AudioGraph {
                 .default_output_device()
                 .ok_or_else(|| anyhow::anyhow!("No output device available"))?;
 
+            let supported_configs = device.supported_output_configs()?;
+            for config in supported_configs {
+                println!("Supported config: {:?}", config);
+            }
+
             let config_format = device.default_output_config()?;
             println!("Using config format: {:?}", config_format);
 
-            let config: cpal::StreamConfig = config_format.clone().into();
+            // Start with default config and apply buffer size if specified
+            let mut config: cpal::StreamConfig = config_format.clone().into();
+            if let Some(size) = buffer_size {
+                println!("Setting buffer size to {} frames", size);
+                config.buffer_size = BufferSize::Fixed(size as u32);
+            } else {
+                println!("Using default buffer size");
+            }
+
             let sample_rate = config.sample_rate.0 as f32;
             self.context = Arc::new(AudioContext::new(sample_rate));
 
@@ -185,6 +266,7 @@ impl AudioGraph {
                     ));
                 }
             };
+            println!("Effective buffer size: {:?}", config.buffer_size);
 
             println!("Starting audio stream");
             stream.play()?;

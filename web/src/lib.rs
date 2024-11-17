@@ -66,7 +66,7 @@ impl Handle {
     #[wasm_bindgen]
     pub fn start(&mut self) -> Result<(), JsValue> {
         self.graph
-            .start()
+            .start(None)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         web_sys::console::log_1(&"Audio graph started".into());
         Ok(())

@@ -24,7 +24,7 @@ fn main() -> anyhow::Result<()> {
     graph.set_output("master_gain");
     println!("Master gain node created and set as output");
 
-    graph.start()?;
+    graph.start(Some(960))?;
     println!("Audio graph started");
 
     // Set master gain to maximum
