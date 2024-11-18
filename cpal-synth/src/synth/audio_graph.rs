@@ -118,6 +118,9 @@ impl AudioGraph {
         T: Sample + FromSample<f32> + Send,
     {
         let num_frames = output.len() / channels;
+        let sample_rate = context.sample_rate(); // Ensure this method provides sample rate in Hz
+        let buffer_duration = num_frames as f32 / sample_rate;
+
         println!(
             "Received buffer size: {} ({} frames)",
             output.len(),
@@ -130,6 +133,7 @@ impl AudioGraph {
             }
             return;
         }
+        //let start_time = Instant::now();
 
         let base_sample = context.current_sample();
 
@@ -145,6 +149,23 @@ impl AudioGraph {
         }
 
         context.increment_samples(num_frames as u64);
+        // Stop timing
+        /*
+        let processing_time = start_time.elapsed();
+        let processing_time_secs = processing_time.as_secs_f32();
+
+        // Compute CPU usage
+         
+        let cpu_usage = (processing_time_secs / buffer_duration) * 100.0;
+
+        // Log CPU usage
+        println!(
+            "Processed buffer of {} frames in {:.3} ms (CPU Usage: {:.2}%)",
+            num_frames,
+            processing_time_secs * 1000.0,
+            cpu_usage
+        );*/
+
     }
 
     // #[cfg(feature = "cpal-output")]
